@@ -6,7 +6,7 @@ import tempfile
 import threading
 from unittest.mock import patch
 import tkinter as tk
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from halo_dashboard.app import App
 from halo_dashboard.games import GAMES
 from halo_dashboard.installer import PLUGIN_SHA256, sha256

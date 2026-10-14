@@ -7,7 +7,7 @@ import tempfile
 import threading
 from unittest.mock import patch
 import tkinter as tk
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from halo_dashboard.app import App
 from halo_dashboard.layout import normalize, preset_layout, place_field
 from halo_dashboard.layout_library import atomic_json, export_layout, import_layout

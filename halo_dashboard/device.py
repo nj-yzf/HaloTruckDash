@@ -44,9 +44,10 @@ def read_text(payload):
     raise ValueError("无法解析音响的文字读回格式")
 
 def enumerate_devices():
-    return [d for d in hid.enumerate(VID, 0) if d.get("product_id") in PIDS
+    return [d for d in hid.enumerate(VID, 0) if d.get('vendor_id') == VID and d.get("product_id") in PIDS
             and d.get("interface_number") == 4 and d.get("usage_page") == 0xFF14
-            and d.get("usage") == 1 and "halo" in str(d.get("product_string", "")).lower()]
+            and d.get("usage") == 1 and (not d.get('product_string')
+                or 'halo' in str(d['product_string']).lower() or 'pixelbar' in str(d['product_string']).lower())]
 
 class Halo:
     def __init__(self, recovery_path: Path):
@@ -77,6 +78,8 @@ class Halo:
         devices = enumerate_devices()
         if not devices:
             raise RuntimeError("未找到 Halo USB 控制接口，请使用带数据传输的 USB 线")
+        if len(devices) > 1:
+            raise RuntimeError('检测到多个Halo控制接口，请只连接一台Halo PixelBar后重试')
         self.info = devices[0]
         self.device = hid.device()
         try:

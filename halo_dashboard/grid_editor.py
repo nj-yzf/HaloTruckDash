@@ -138,8 +138,13 @@ class GridEditor:
         ttk.Button(controls, text='重做', command=self.redo).pack(side='left')
         ttk.Button(controls, text='保存并应用', command=self.apply).pack(side='right')
         ttk.Button(controls, text='取消', command=self.window.destroy).pack(side='right', padx=8)
-        self.window.after_idle(self.draw)
-        self.window.after_idle(self.refresh_names)
+        self.idle_tasks = (self.window.after_idle(self.draw), self.window.after_idle(self.refresh_names))
+        self.window.bind('<Destroy>', self.cancel_idle_tasks, add='+')
+
+    def cancel_idle_tasks(self, event):
+        if event.widget is self.window:
+            for task in self.idle_tasks:
+                self.window.after_cancel(task)
 
     def viewport_resized(self, event):
         self.viewport.itemconfigure(self.content_window, width=max(1020, event.width))

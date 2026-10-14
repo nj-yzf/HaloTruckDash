@@ -22,8 +22,9 @@ from .grid_editor import GridEditor
 from .layout_library import LayoutLibrary, atomic_json
 from .layout_catalog import LayoutCatalog, LEGACY_DRAFT_NAME, LEGACY_NAMES, choices_for
 from .window_geometry import fit_main
-from .update_ui import UpdateController
 from .version import VERSION
+from .storage import data_directory
+from .branding import configure_windows_app, apply_icon
 
 BASE = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parents[1]
 ASSETS = Path(getattr(sys, "_MEIPASS", BASE))
@@ -158,10 +159,11 @@ class Worker(threading.Thread):
             self.finished.set()
 
 class App:
-    def __init__(self, root, updates_enabled=True):
+    def __init__(self, root):
         self.root = root
         self.closing = False
-        self.root.title(f"Halo Truck Dash · 欧卡/美卡点阵仪表 {VERSION}")
+        self.root.title(f"HaloTruckDash · 欧卡/美卡点阵仪表 {VERSION}")
+        apply_icon(root, ASSETS / 'assets')
         self.root.geometry("780x660")
         self.root.minsize(730, 650)
         self.root.configure(bg="#101722")
@@ -202,7 +204,7 @@ class App:
         self.footer.bind("<Configure>", lambda e: self.footer.configure(wraplength=max(1, e.width - 4)))
         shell = ttk.Frame(container)
         shell.pack(fill="both", expand=True)
-        ttk.Label(shell, text="HALO / TRUCK DASH", style="Title.TLabel").pack(anchor="w")
+        ttk.Label(shell, text="HaloTruckDash", style="Title.TLabel").pack(anchor="w")
         ttk.Label(shell, text="欧卡2 / ETS2 · 美卡 / ATS  →  Halo PixelBar", style="Muted.TLabel").pack(anchor="w", pady=(3, 12))
         self.canvas = tk.Canvas(shell, height=98, bg="#050910", highlightthickness=1, highlightbackground="#2b3d53")
         self.canvas.pack(fill="x")
@@ -259,8 +261,6 @@ class App:
         bottom = ttk.Frame(shell)
         bottom.pack(fill="x")
         ttk.Button(bottom, text="安装遥测插件", command=self.install).pack(side="left")
-        self.updater = UpdateController(root, STATE, enabled=updates_enabled)
-        ttk.Button(bottom, text="检查更新…", command=self.updater.check).pack(side="left", padx=8)
         ttk.Button(bottom, text="使用说明", command=self.help).pack(side="right")
         fit_main(root)
         self.worker = Worker()
@@ -371,7 +371,7 @@ class App:
             elif kind == "error":
                 logging.error(value)
                 self.device_status.configure(text=value, wraplength=720)
-                messagebox.showerror("Halo Truck Dash", value, parent=self.root)
+                messagebox.showerror("HaloTruckDash", value, parent=self.root)
             elif kind == "layout_warning":
                 self.device_status.configure(text=f"自定义布局无效，暂用默认布局1：{value}", wraplength=720)
         if latest_frame:
@@ -458,11 +458,10 @@ class App:
             '支持多个具名方案、JSON导入/导出及打开布局文件夹批量复制。\n'
             '切换速度单位后，自定义布局中手写的单位文字需自行修改。\n\n'
             '兼容性：本程序通过只读共享内存获取遥测；但其他仪表使用的\n'
-            'SDK插件版本可能不同，SimHub等软件尚未完成联合实测。\n'
+            'SDK插件版本可能不同；当前版本已得到用户与SimHub共存实测反馈。\n'
             '安装器不会覆盖不同版本的同名插件，请勿直接删改其他软件插件。\n'
             '切换欧卡/美卡前先退出上一款游戏。详细用法见同目录README.md；\n'
-            '设置、布局、日志和恢复记录均在同目录data文件夹。\n'
-            '“检查更新…”可配置更新源、开启自动检查并下载经过校验的更新包。', parent=self.root)
+            f'设置、布局、日志和恢复记录目录：\n{STATE}', parent=self.root)
 
     def save_settings(self):
         STATE.mkdir(exist_ok=True)
@@ -480,7 +479,6 @@ class App:
         if self.closing:
             return
         self.closing = True
-        self.updater.shutdown()
         if self.poll_id is not None:
             self.root.after_cancel(self.poll_id)
             self.poll_id = None
@@ -506,18 +504,27 @@ def main():
     preview_state = tempfile.TemporaryDirectory(prefix='halo-dashboard-preview-') if args.ui_smoke else None
     if preview_state is not None:
         STATE = Path(preview_state.name)
+    else:
+        STATE = data_directory(BASE)
     STATE.mkdir(exist_ok=True)
     logging.basicConfig(filename=STATE / "dashboard.log", encoding="utf-8", level=logging.INFO,
                         format="%(asctime)s %(levelname)s %(message)s")
     if args.diagnose:
         reader = Telemetry()
         try:
-            result = {"devices": [{"pid": hex(d["product_id"]), "product": d["product_string"]} for d in enumerate_devices()],
+            import platform
+            import struct
+            result = {"application": "HaloTruckDash", "version": VERSION, "windows": platform.platform(),
+                      "process_bits": struct.calcsize('P') * 8,
+                      "devices": [{"vid": hex(d['vendor_id']), "pid": hex(d["product_id"]),
+                                   "product": d.get("product_string"), "interface": d.get('interface_number'),
+                                   "usage_page": hex(d['usage_page']), "usage": d['usage']} for d in enumerate_devices()],
                       "telemetry": vars(reader.read())}
             (STATE / "diagnostics.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
         finally:
             reader.close()
         return
+    configure_windows_app()
     kernel = ctypes.WinDLL("kernel32", use_last_error=True)
     kernel.CreateMutexW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR]
     kernel.CreateMutexW.restype = wintypes.HANDLE
@@ -527,18 +534,18 @@ def main():
     if ctypes.get_last_error() == 183:
         root = tk.Tk()
         root.withdraw()
-        messagebox.showinfo("Halo Truck Dash", "程序已在运行，请切换到已有窗口。")
+        apply_icon(root, ASSETS / 'assets')
+        messagebox.showinfo("HaloTruckDash", "程序已在运行，请切换到已有窗口。")
         root.destroy()
         kernel.CloseHandle(mutex)
         return
     try:
         root = tk.Tk()
-        app = App(root, updates_enabled=not args.ui_smoke)
+        app = App(root)
         if args.ui_smoke:
             app.demo.set(True)
             root.after(350, app.edit_layout)
-            root.after(700, app.updater.show)
-            root.after(1800, app.close)
+            root.after(1500, app.close)
         root.mainloop()
     finally:
         if mutex:
