@@ -6,7 +6,7 @@ $releaseDirectory = Join-Path 'dist' "v$releaseVersion"
 $releaseArchive = Join-Path 'dist' "HaloTruckDash-v$releaseVersion-win-x64.zip"
 & .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 if ($LASTEXITCODE -ne 0) { throw 'Tests failed' }
-foreach ($check in @('grid_ui_verify', 'catalog_ui_verify', 'ats_ui_verify', 'main_ui_verify')) {
+foreach ($check in @('grid_ui_verify', 'catalog_ui_verify', 'ats_ui_verify', 'main_ui_verify', 'hardware_ui_verify')) {
     & .\.venv\Scripts\python.exe "tools/checks/$check.py"
     if ($LASTEXITCODE -ne 0) { throw "$check failed" }
 }

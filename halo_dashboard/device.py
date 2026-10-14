@@ -4,9 +4,9 @@ import logging
 from pathlib import Path
 import time
 import hid
-
-VID = 0x2D99
-PIDS = (0xA160, 0xA106)
+from .hardware import (VID, PIDS, known_device, eligible_device, discover_candidates,
+                       device_key, DeviceRegistry)
+from .layout_library import atomic_json
 
 def packet(command, payload=b""):
     body = bytes(payload)
@@ -44,10 +44,7 @@ def read_text(payload):
     raise ValueError("无法解析音响的文字读回格式")
 
 def enumerate_devices():
-    return [d for d in hid.enumerate(VID, 0) if d.get('vendor_id') == VID and d.get("product_id") in PIDS
-            and d.get("interface_number") == 4 and d.get("usage_page") == 0xFF14
-            and d.get("usage") == 1 and (not d.get('product_string')
-                or 'halo' in str(d['product_string']).lower() or 'pixelbar' in str(d['product_string']).lower())]
+    return [d for d in hid.enumerate(VID, 0) if known_device(d)]
 
 class Halo:
     def __init__(self, recovery_path: Path):
@@ -57,6 +54,8 @@ class Halo:
         self.last_text = None
         self.last_color = None
         self.recovery_path = recovery_path
+        self.registry = DeviceRegistry(recovery_path.parent / 'validated-devices.json')
+        self.query_only = False
         self.last_text_write = 0.0
         self.last_layout_write = 0.0
         self.last_health_check = 0.0
@@ -75,21 +74,64 @@ class Halo:
         self.last_layout_write = time.monotonic()
 
     def open(self):
-        devices = enumerate_devices()
+        if self.registry.records or self.registry.selected:
+            devices = [info for info in discover_candidates() if self.registry.usable(info)]
+            target = self.saved.get('device_key') if isinstance(self.saved, dict) else None
+            target = target or self.registry.selected
+            if target:
+                devices = [info for info in devices if device_key(info) == target]
+        else:
+            devices = enumerate_devices()
         if not devices:
-            raise RuntimeError("未找到 Halo USB 控制接口，请使用带数据传输的 USB 线")
+            raise RuntimeError("未找到可用的Halo控制接口；请检查USB数据线，或在“设备与诊断”中验证候选设备")
         if len(devices) > 1:
-            raise RuntimeError('检测到多个Halo控制接口，请只连接一台Halo PixelBar后重试')
+            raise RuntimeError('检测到多个Halo控制接口，请在“设备与诊断”中验证并选用其中一台')
         self.info = devices[0]
         self.device = hid.device()
         try:
             self.device.open_path(self.info["path"])
-            self.query(0xEE)  # Validate framing before any settings are changed.
+            if known_device(self.info):
+                self.query(0xEE)  # Validate framing before any settings are changed.
+            else:
+                self.query_only = True
+                self.protocol_snapshot()  # Recheck an approved variant on every connection.
+                self.query_only = False
         except Exception:
+            self.query_only = False
             self.close()
             raise
 
+    def protocol_snapshot(self):
+        state = self.query(0xEE)
+        if len(state) < 9 or state[0] != 0:
+            raise ValueError('屏幕状态响应格式或状态码不兼容')
+        original = read_text(self.query(0xE7, b'\0'))
+        if len(original.encode('utf-8')) > 48:
+            raise ValueError('原文字超过可恢复范围，未启用此设备')
+        return state, original
+
+    def verify_candidate(self, info):
+        if self.device:
+            raise RuntimeError('请先停止同步，再验证设备')
+        if not (eligible_device(info) or self.registry.usable(info)):
+            raise ValueError('该接口仅供诊断，名称或屏幕控制接口信息不足')
+        pending = self.saved.get('device_key') if isinstance(self.saved, dict) else None
+        if pending and pending != device_key(info):
+            raise ValueError('原音响仍有待恢复记录，请先连接原音响恢复屏幕')
+        self.info = info
+        self.device = hid.device()
+        self.query_only = True
+        try:
+            self.device.open_path(info['path'])
+            self.protocol_snapshot()
+            self.registry.select(info, verified=True)
+        finally:
+            self.query_only = False
+            self.close()
+
     def write(self, command, payload):
+        if self.query_only and command not in (0xEE, 0xE7):
+            raise RuntimeError('验证阶段只允许查询屏幕状态和文字')
         self.drain()
         # Space consecutive commands; firmware applies settings asynchronously.
         remaining = .03 - (time.monotonic() - self.last_write)
@@ -111,17 +153,24 @@ class Halo:
         raise TimeoutError("音响查询超时，请关闭其他程序对音响屏幕的控制后重试")
 
     def capture(self):
-        state = self.query(0xEE)
-        if len(state) < 9:
-            raise ValueError("音响返回的屏幕状态过短")
-        original = read_text(self.query(0xE7, b"\0"))
-        self.saved = {"state": list(state[:9]), "text": original}
+        state, original = self.protocol_snapshot()
+        key = device_key(self.info) if self.info else None
+        saved = {"state": list(state[:9]), "text": original, 'device_key': key}
         # A previous recovery record must survive a crash/reconnect.
         if self.recovery_path.exists():
-            self.saved = json.loads(self.recovery_path.read_text(encoding="utf-8"))
+            saved = json.loads(self.recovery_path.read_text(encoding="utf-8"))
+            previous = saved.get('device_key')
+            if previous and previous != key:
+                raise ValueError('恢复记录属于另一台音响，请先连接原音响恢复，或备份并移走旧恢复记录')
+            if not previous and self.info:
+                if not known_device(self.info):
+                    raise ValueError('旧版恢复记录未绑定设备，不能用于未知型号；请先用原音响恢复')
+                saved['device_key'] = key
+                atomic_json(self.recovery_path, saved)
         else:
             self.recovery_path.parent.mkdir(parents=True, exist_ok=True)
-            self.recovery_path.write_text(json.dumps(self.saved, ensure_ascii=False), encoding="utf-8")
+            atomic_json(self.recovery_path, saved)
+        self.saved = saved
 
     def show(self, frame, verify=False):
         now = time.monotonic()
@@ -165,6 +214,9 @@ class Halo:
     def restore(self):
         if not self.saved:
             return
+        key = self.saved.get('device_key')
+        if key and (not self.info or key != device_key(self.info)):
+            raise ValueError('当前音响与恢复记录不匹配，已保留记录且未修改屏幕')
         original = self.saved["text"]
         if original:
             self.write(0xE8, text_payload(original))

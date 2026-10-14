@@ -60,7 +60,7 @@ class Firmware:
 
 class ReliabilityTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
+        self.tmp = tempfile.TemporaryDirectory(dir=Path(__file__).parent)
         self.halo = Halo(Path(self.tmp.name) / 'recovery.json')
         self.firmware = Firmware()
         self.halo.device = self.firmware

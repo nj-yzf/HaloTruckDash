@@ -12,7 +12,7 @@ import time
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
-from .device import Halo, enumerate_devices
+from .device import Halo
 from .display import COLORS, GEAR_MODES, format_frame
 from .installer import DEFAULT_GAME, install_plugin
 from .games import GAMES, GAME_CHOICES, default_game_dir, detect_game
@@ -25,6 +25,8 @@ from .window_geometry import fit_main
 from .version import VERSION
 from .storage import data_directory
 from .branding import configure_windows_app, apply_icon
+from .hardware import DeviceRegistry, discover_candidates, device_key, device_rows, diagnostics_document
+from .device_dialog import DeviceDialog
 
 BASE = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parents[1]
 ASSETS = Path(getattr(sys, "_MEIPASS", BASE))
@@ -47,6 +49,7 @@ class Worker(threading.Thread):
     def run(self):
         reader = Telemetry()
         halo = Halo(STATE / "screen-recovery.json")
+        registry = getattr(halo, 'registry', None) or DeviceRegistry(STATE / 'validated-devices.json')
         start = time.monotonic()
         last_send = 0.0
         first_send = False
@@ -59,6 +62,30 @@ class Worker(threading.Thread):
             while not quitting:
                 while not self.commands.empty():
                     command = self.commands.get()
+                    if isinstance(command, tuple):
+                        action, key = command
+                        try:
+                            devices = discover_candidates()
+                            if action == 'hardware_verify':
+                                if self.active:
+                                    raise RuntimeError('请先停止同步，再验证和选用设备')
+                                matches = [info for info in devices if device_key(info) == key]
+                                if len(matches) != 1:
+                                    raise RuntimeError('设备已拔出或标识已变化，请刷新列表后重新选择')
+                                halo.verify_candidate(matches[0])
+                                notice = '基础协议验证通过，已选用于同步；未改动屏幕。显示效果仍需开始同步后观察。'
+                            elif action == 'hardware_export':
+                                atomic_json(STATE / 'diagnostics.json', diagnostics_document(registry, devices, reader.read()))
+                                notice = f'诊断已导出：{STATE / "diagnostics.json"}（不含序列号和设备路径）'
+                            elif action == 'hardware_scan':
+                                notice = f'发现{len(devices)}个相关HID接口；枚举未发送任何HID查询。'
+                            else:
+                                raise ValueError('未知的设备操作')
+                            self.event('hardware', {'rows': device_rows(registry, devices, include_keys=True), 'active': self.active})
+                            self.event('hardware_notice', {'text': notice, 'error': False})
+                        except Exception as exc:
+                            self.event('hardware_notice', {'text': str(exc), 'error': True})
+                        continue
                     if command in ("stop", "quit"):
                         self.active = False
                         try:
@@ -139,8 +166,10 @@ class Worker(threading.Thread):
                         self.event("device", f"同步中断，2 秒后自动重连：{exc}")
                 if not self.active and now - last_scan > 5:
                     try:
-                        devices = enumerate_devices()
-                        self.event("scan", "音响已连接" if devices else "未检测到音响 USB 接口")
+                        rows = device_rows(registry, include_keys=True)
+                        usable = sum(row['usable'] for row in rows)
+                        self.event('hardware', {'rows': rows, 'active': self.active})
+                        self.event("scan", '音响已连接' if usable else '发现候选接口，请打开“设备与诊断”验证' if rows else '未检测到音响 USB 接口')
                     except Exception as exc:
                         self.event("scan", str(exc))
                     last_scan = now
@@ -192,6 +221,8 @@ class App:
         self.layout_catalog = LayoutCatalog(self.layout_library)
         self.layout_choices = {}
         self.editor = None
+        self.device_dialog = None
+        self.hardware_state = {'rows': [], 'active': False}
         self.refresh_layout_choices()
         self.load_settings()
         container = ttk.Frame(root, padding=(20, 14))
@@ -261,6 +292,7 @@ class App:
         bottom = ttk.Frame(shell)
         bottom.pack(fill="x")
         ttk.Button(bottom, text="安装遥测插件", command=self.install).pack(side="left")
+        ttk.Button(bottom, text='设备与诊断…', command=self.open_device_dialog).pack(side='left', padx=8)
         ttk.Button(bottom, text="使用说明", command=self.help).pack(side="right")
         fit_main(root)
         self.worker = Worker()
@@ -368,6 +400,16 @@ class App:
             elif kind == "active":
                 self.start_button.configure(state="disabled" if value else "normal")
                 self.stop_button.configure(state="normal" if value else "disabled")
+                self.hardware_state['active'] = value
+                if self.device_dialog is not None and self.device_dialog.exists():
+                    self.device_dialog.set_state(self.hardware_state)
+            elif kind == 'hardware':
+                self.hardware_state = value
+                if self.device_dialog is not None and self.device_dialog.exists():
+                    self.device_dialog.set_state(value)
+            elif kind == 'hardware_notice':
+                if self.device_dialog is not None and self.device_dialog.exists():
+                    self.device_dialog.notice(value['text'], value['error'])
             elif kind == "error":
                 logging.error(value)
                 self.device_status.configure(text=value, wraplength=720)
@@ -402,6 +444,16 @@ class App:
             self.game_dir.set(directory)
             self.game_dirs[self._install_key] = directory
             self.save_settings()
+
+    def open_device_dialog(self, scan=True):
+        if self.device_dialog is None or not self.device_dialog.exists():
+            self.device_dialog = DeviceDialog(self.root, self.worker.commands.put, STATE)
+        else:
+            self.device_dialog.window.lift()
+        self.device_dialog.set_state(self.hardware_state)
+        if scan:
+            self.device_dialog.refresh()
+        return self.device_dialog
 
     def install_target_changed(self, event=None):
         self.game_dirs[self._install_key] = self.game_dir.get()
@@ -460,6 +512,8 @@ class App:
             '兼容性：本程序通过只读共享内存获取遥测；但其他仪表使用的\n'
             'SDK插件版本可能不同；当前版本已得到用户与SimHub共存实测反馈。\n'
             '安装器不会覆盖不同版本的同名插件，请勿直接删改其他软件插件。\n'
+            '“设备与诊断”可发现未知PID候选接口，停止同步后验证并选用；\n'
+            '验证只查询状态和文字，不改变显示；可导出不含序列号的诊断。\n'
             '切换欧卡/美卡前先退出上一款游戏。详细用法见同目录README.md；\n'
             f'设置、布局、日志和恢复记录目录：\n{STATE}', parent=self.root)
 
@@ -512,15 +566,8 @@ def main():
     if args.diagnose:
         reader = Telemetry()
         try:
-            import platform
-            import struct
-            result = {"application": "HaloTruckDash", "version": VERSION, "windows": platform.platform(),
-                      "process_bits": struct.calcsize('P') * 8,
-                      "devices": [{"vid": hex(d['vendor_id']), "pid": hex(d["product_id"]),
-                                   "product": d.get("product_string"), "interface": d.get('interface_number'),
-                                   "usage_page": hex(d['usage_page']), "usage": d['usage']} for d in enumerate_devices()],
-                      "telemetry": vars(reader.read())}
-            (STATE / "diagnostics.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+            registry = DeviceRegistry(STATE / 'validated-devices.json')
+            atomic_json(STATE / 'diagnostics.json', diagnostics_document(registry, truck=reader.read()))
         finally:
             reader.close()
         return
@@ -545,6 +592,7 @@ def main():
         if args.ui_smoke:
             app.demo.set(True)
             root.after(350, app.edit_layout)
+            root.after(650, lambda: app.open_device_dialog(scan=False))
             root.after(1500, app.close)
         root.mainloop()
     finally:

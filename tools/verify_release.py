@@ -61,6 +61,7 @@ def main():
     plugin = next(name for name in bundled.toc if name.replace('\\', '/') == 'assets/scs-telemetry.dll')
     assert hashlib.sha256(bundled.extract(plugin)).hexdigest() == PLUGIN_SHA256
     pyz = bundled.open_embedded_archive('PYZ.pyz')
+    assert {'halo_dashboard.hardware', 'halo_dashboard.device_dialog'}.issubset(pyz.toc)
     assert 'halo_dashboard.updates' not in pyz.toc and 'halo_dashboard.update_ui' not in pyz.toc
     for name in pyz.toc:
         if name.startswith('halo_dashboard.'):
