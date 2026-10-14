@@ -2,6 +2,7 @@
 import argparse
 import hashlib
 import os
+import json
 from pathlib import Path
 import shutil
 import subprocess
@@ -37,7 +38,7 @@ def main():
         assert package.testzip() is None
         names = [name.replace('\\', '/') for name in package.namelist()]
         assert all(not name.startswith(('data/', 'research/', '.git/')) and '/data/' not in name for name in names)
-        assert all(name in names for name in ['HaloTruckDash.exe', 'LICENSE', 'README.md', 'THIRD_PARTY_NOTICES.md', 'docs/COMPATIBILITY.md'])
+        assert all(name in names for name in ['HaloTruckDash.exe', 'LICENSE', 'README.md', 'THIRD_PARTY_NOTICES.md', 'docs/COMPATIBILITY.md', 'docs/SUPPORT.md'])
         assert package.read('HaloTruckDash.exe') == exe.read_bytes()
     for line in (release / 'SHA256SUMS.txt').read_text(encoding='ascii').splitlines():
         digest, name = line.split('  ', 1)
@@ -61,7 +62,7 @@ def main():
     plugin = next(name for name in bundled.toc if name.replace('\\', '/') == 'assets/scs-telemetry.dll')
     assert hashlib.sha256(bundled.extract(plugin)).hexdigest() == PLUGIN_SHA256
     pyz = bundled.open_embedded_archive('PYZ.pyz')
-    assert {'halo_dashboard.hardware', 'halo_dashboard.device_dialog'}.issubset(pyz.toc)
+    assert {'halo_dashboard.hardware', 'halo_dashboard.device_dialog', 'halo_dashboard.support'}.issubset(pyz.toc)
     assert 'halo_dashboard.updates' not in pyz.toc and 'halo_dashboard.update_ui' not in pyz.toc
     for name in pyz.toc:
         if name.startswith('halo_dashboard.'):
@@ -78,7 +79,21 @@ def main():
             environment['PATH'] = str(Path(environment.get('SystemRoot', r'C:\Windows')) / 'System32')
             result = subprocess.run([str(standalone), '--ui-smoke'], env=environment, timeout=40)
             assert result.returncode == 0
-    print(f'{PRODUCT_NAME} {VERSION}: x64 ZIP, licenses, icons, version resources, bundled runtime, no updater and isolated EXE check passed.')
+            result = subprocess.run([str(standalone), '--feedback'], env=environment, timeout=40)
+            assert result.returncode == 0
+            feedback = list((standalone.parent / 'data' / 'feedback').glob('*.zip'))
+            assert len(feedback) == 1
+            with zipfile.ZipFile(feedback[0]) as package:
+                assert package.testzip() is None
+                assert set(package.namelist()).issubset({'report.json', 'README.txt', 'logs/dashboard.log',
+                    'logs/dashboard.log.1', 'logs/dashboard.log.2', 'logs/dashboard.log.3'})
+                report = json.loads(package.read('report.json'))
+                assert report['format'] == 'HaloTruckDash-feedback'
+                assert report['diagnostics']['version'] == VERSION
+                assert report['diagnostics']['hid_queries_sent'] is False
+                assert report['plugins']['bundled']['matches_bundled_version']
+                assert 'serial_number' not in package.read('report.json').decode()
+    print(f'{PRODUCT_NAME} {VERSION}: x64 ZIP, licenses, icons, bundled runtime, no updater, isolated UI and local feedback export checks passed.')
 
 
 if __name__ == '__main__':

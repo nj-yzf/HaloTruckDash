@@ -1,14 +1,18 @@
 """Candidate device discovery, explicit query-only verification and diagnostics."""
 import os
+import logging
+import webbrowser
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk
 from .window_geometry import work_area
+from .support import feedback_url
 
 
 class DeviceDialog:
-    def __init__(self, root, send, state):
+    def __init__(self, root, send, state, on_feedback=None):
         self.send, self.state = send, Path(state)
+        self.on_feedback = on_feedback
         self.rows, self.active, self.busy = {}, False, False
         self.window = tk.Toplevel(root)
         self.window.title('设备与诊断 · HaloTruckDash')
@@ -18,6 +22,13 @@ class DeviceDialog:
         shell.pack(fill='both', expand=True)
         footer = ttk.Frame(shell)
         footer.pack(side='bottom', fill='x', pady=(10, 0))
+        support = ttk.Frame(shell)
+        support.pack(side='bottom', fill='x', pady=(10, 0))
+        self.feedback_button = ttk.Button(support, text='导出反馈包', command=self.export_feedback)
+        self.feedback_button.pack(side='left')
+        self.issue_button = ttk.Button(support, text='反馈问题…', command=self.open_issue)
+        self.issue_button.pack(side='left', padx=8)
+        ttk.Label(support, text='反馈包仅保存在本机，需自行上传。', style='Muted.TLabel').pack(side='left')
         self.refresh_button = ttk.Button(footer, text='刷新列表', command=self.refresh)
         self.refresh_button.pack(side='left')
         self.verify_button = ttk.Button(footer, text='验证并选用', command=self.verify)
@@ -59,6 +70,19 @@ class DeviceDialog:
         height = min(max(500, self.window.winfo_reqheight()), bottom - top - 64)
         self.window.minsize(width, height)
         self.window.geometry(f'{width}x{height}')
+
+    def export_feedback(self):
+        if self.on_feedback is not None:
+            self.on_feedback()
+
+    def open_issue(self):
+        try:
+            if not webbrowser.open(feedback_url()):
+                raise OSError('无法打开浏览器，请手动访问GitHub仓库的Issues页面')
+            self.status.configure(text='请在浏览器填写问题，附上导出的反馈ZIP；程序不会自动提交或上传。')
+        except Exception as exc:
+            logging.exception('Feedback browser launch failed')
+            self.notice(str(exc), True)
 
     def exists(self):
         return self.window.winfo_exists()

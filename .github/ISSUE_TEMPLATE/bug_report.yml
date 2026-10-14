@@ -1,0 +1,39 @@
+name: 问题反馈
+description: 反馈连接、遥测、显示或界面问题
+body:
+  - type: markdown
+    attributes:
+      value: |
+        请在问题出现后打开“设备与诊断…”→“导出反馈包”，将生成的ZIP拖入下方描述框。
+        导出后可先解压检查内容；无需提供整个data目录。程序不会自动上传文件。
+  - type: input
+    id: version
+    attributes:
+      label: HaloTruckDash版本
+      placeholder: 例如 1.2.0
+    validations:
+      required: true
+  - type: dropdown
+    id: game
+    attributes:
+      label: 游戏或场景
+      options:
+        - 欧洲卡车模拟2 / ETS2
+        - 美国卡车模拟 / ATS
+        - 模拟演示
+        - 尚未进入游戏 / 其他
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: 问题描述与反馈包
+      description: 请说明大致发生时间、操作步骤、预期和实际结果，并将反馈ZIP拖入此框。
+      placeholder: |
+        发生时间：
+        操作步骤：
+        预期结果：
+        实际表现：
+        是否同时运行其他仪表或音响控制软件：
+    validations:
+      required: true

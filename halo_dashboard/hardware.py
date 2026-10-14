@@ -6,6 +6,7 @@ import re
 import hid
 
 from .layout_library import atomic_json
+from .support import remember_devices
 
 VID = 0x2D99
 PIDS = (0xA160, 0xA106)
@@ -33,7 +34,9 @@ def eligible_device(info):
 def discover_candidates():
     # Enumerate metadata only. Do not open devices or send any HID reports.
     result, seen = [], set()
-    for info in hid.enumerate():
+    inventory = hid.enumerate()
+    remember_devices(inventory)
+    for info in inventory:
         if info.get('vendor_id') != VID and not family_name(info):
             continue
         path = info.get('path')

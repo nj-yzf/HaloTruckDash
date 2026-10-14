@@ -7,6 +7,7 @@ import hid
 from .hardware import (VID, PIDS, known_device, eligible_device, discover_candidates,
                        device_key, DeviceRegistry)
 from .layout_library import atomic_json
+from .support import remember_devices
 
 def packet(command, payload=b""):
     body = bytes(payload)
@@ -44,7 +45,9 @@ def read_text(payload):
     raise ValueError("无法解析音响的文字读回格式")
 
 def enumerate_devices():
-    return [d for d in hid.enumerate(VID, 0) if known_device(d)]
+    devices = [d for d in hid.enumerate(VID, 0) if known_device(d)]
+    remember_devices(devices)
+    return devices
 
 class Halo:
     def __init__(self, recovery_path: Path):
@@ -192,7 +195,7 @@ class Halo:
             state = self.query(0xEE)
             text = read_text(self.query(0xE7, b"\0"))
             if state[1:9] != expected or text != frame.text:
-                logging.warning("屏幕状态偏离仪表：state=%s text=%r expected=%r，重新应用", state.hex(), text, frame.text)
+                logging.warning("屏幕状态偏离仪表：state=%s text_matches=%s，重新应用", state.hex(), text == frame.text)
                 self.write(0xE8, text_payload(frame.text))
                 self.layout(frame.color)
                 self.wait_for(lambda: read_text(self.query(0xE7, b"\0")) == frame.text,

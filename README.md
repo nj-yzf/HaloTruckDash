@@ -36,6 +36,12 @@
 - 设置、布局、日志位于程序旁的 `data/`；目录不可写时改用 `%LOCALAPPDATA%/HaloTruckDash/data/`，在“使用说明”中可查看实际位置。
 - 升级前关闭旧版，再将整个 `data` 目录复制到新版旁即可保留配置。“设备与诊断…”可导出诊断，也可运行 `HaloTruckDash.exe --diagnose`；仅枚举设备，不发送HID查询或设置，不导出USB序列号及设备路径。
 
+## 遇到问题
+
+在问题出现后打开“设备与诊断…”→“导出反馈包”，程序会打开保存ZIP的文件夹。点击“反馈问题…”进入GitHub，填写发生时间、操作步骤和实际表现，并手动附上ZIP。无需上传整个data目录，程序不会自动上传文件。
+
+反馈包包含脱敏近期日志、设备与遥测诊断、同步运行统计及插件校验结果；排除保存的布局、配置文件和原屏幕文字。可先解压检查。日志每份约2MB，保留三份轮换备份；反馈包每份日志仅取最近256KB。若无法打开界面，可运行 `HaloTruckDash.exe --feedback`，文件保存在数据目录的 `feedback/` 中。详细说明见 [故障反馈](docs/SUPPORT.md)。
+
 ## 开源与构建
 
 原创代码和图标采用 [MIT](LICENSE) 许可；第三方组件保留各自许可，见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。开发构建方法见 [BUILDING.md](docs/BUILDING.md)。

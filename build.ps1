@@ -21,6 +21,7 @@ New-Item -ItemType Directory -Path "$releaseDirectory/licenses", "$releaseDirect
 Get-ChildItem -LiteralPath assets/licenses | ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination "$releaseDirectory/licenses" -Recurse -Force }
 Copy-Item -LiteralPath docs/COMPATIBILITY.md -Destination "$releaseDirectory/docs/COMPATIBILITY.md" -Force
 Copy-Item -LiteralPath docs/BUILDING.md -Destination "$releaseDirectory/docs/BUILDING.md" -Force
+Copy-Item -LiteralPath docs/SUPPORT.md -Destination "$releaseDirectory/docs/SUPPORT.md" -Force
 Compress-Archive -Path "$releaseDirectory/HaloTruckDash.exe", "$releaseDirectory/README.md", "$releaseDirectory/LICENSE", "$releaseDirectory/THIRD_PARTY_NOTICES.md", "$releaseDirectory/licenses", "$releaseDirectory/docs" -DestinationPath $releaseArchive -Force
 $releaseHashes = Get-FileHash "$releaseDirectory/HaloTruckDash.exe", $releaseArchive -Algorithm SHA256
 $releaseHashes | ForEach-Object { "$($_.Hash.ToLower())  $([IO.Path]::GetFileName($_.Path))" } | Set-Content -LiteralPath "$releaseDirectory/SHA256SUMS.txt" -Encoding ascii

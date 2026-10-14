@@ -9,6 +9,7 @@ import sys
 import threading
 import tempfile
 import time
+import os
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
@@ -27,6 +28,8 @@ from .storage import data_directory
 from .branding import configure_windows_app, apply_icon
 from .hardware import DeviceRegistry, discover_candidates, device_key, device_rows, diagnostics_document
 from .device_dialog import DeviceDialog
+from .support import (RuntimeStatus, configure_logging, install_exception_hooks, record_ui_exception,
+                      collect_diagnostics, export_feedback, plugin_information, redact_text)
 
 BASE = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parents[1]
 ASSETS = Path(getattr(sys, "_MEIPASS", BASE))
@@ -42,11 +45,24 @@ class Worker(threading.Thread):
                          "custom": DEFAULT_LAYOUT.copy(), "gear_mode": 'auto', 'speed_unit': 'km/h'}
         self.active = False
         self.finished = threading.Event()
+        self.runtime = RuntimeStatus()
 
     def event(self, kind, value):
         self.events.put((kind, value))
 
     def run(self):
+        try:
+            self._run()
+        except Exception:
+            logging.exception('Worker initialization or cleanup failed')
+            self.event('error', '后台线程异常退出，请打开“设备与诊断”导出反馈包')
+        finally:
+            self.active = False
+            self.runtime.update(sync_active=False, device_connected=False, worker_finished=True)
+            self.event('active', False)
+            self.finished.set()
+
+    def _run(self):
         reader = Telemetry()
         halo = Halo(STATE / "screen-recovery.json")
         registry = getattr(halo, 'registry', None) or DeviceRegistry(STATE / 'validated-devices.json')
@@ -58,6 +74,8 @@ class Worker(threading.Thread):
         reconnect_attempts = 0
         last_error = None
         quitting = False
+        telemetry_state = None
+        last_summary = start
         try:
             while not quitting:
                 while not self.commands.empty():
@@ -72,7 +90,10 @@ class Worker(threading.Thread):
                                 matches = [info for info in devices if device_key(info) == key]
                                 if len(matches) != 1:
                                     raise RuntimeError('设备已拔出或标识已变化，请刷新列表后重新选择')
-                                halo.verify_candidate(matches[0])
+                                with self.runtime.operation('verify_protocol'):
+                                    halo.verify_candidate(matches[0])
+                                logging.info('Device protocol verified VID=%04X PID=%04X interface=%s',
+                                             matches[0]['vendor_id'], matches[0]['product_id'], matches[0].get('interface_number'))
                                 notice = '基础协议验证通过，已选用于同步；未改动屏幕。显示效果仍需开始同步后观察。'
                             elif action == 'hardware_export':
                                 atomic_json(STATE / 'diagnostics.json', diagnostics_document(registry, devices, reader.read()))
@@ -84,19 +105,26 @@ class Worker(threading.Thread):
                             self.event('hardware', {'rows': device_rows(registry, devices, include_keys=True), 'active': self.active})
                             self.event('hardware_notice', {'text': notice, 'error': False})
                         except Exception as exc:
+                            logging.exception('Device operation failed action=%s', action)
                             self.event('hardware_notice', {'text': str(exc), 'error': True})
                         continue
                     if command in ("stop", "quit"):
                         self.active = False
+                        self.runtime.update(sync_active=False)
+                        logging.info('Sync stop requested action=%s', command)
                         try:
-                            if halo.saved and not halo.device:
-                                halo.open()
-                            halo.restore()
+                            with self.runtime.operation('restore_screen'):
+                                if halo.saved and not halo.device:
+                                    halo.open()
+                                halo.restore()
+                            logging.info('Screen restored after stop')
                             self.event("device", "已停止同步，原屏幕设置已恢复")
                         except Exception as exc:
+                            logging.exception('Screen restore after stop failed')
                             self.event("error", f"恢复屏幕失败：{exc}。恢复记录已保留，可点击“恢复原屏幕”重试")
                         finally:
                             halo.close()
+                            self.runtime.update(device_connected=False)
                             self.event("active", False)
                         quitting = command == "quit"
                     elif command in ("start", "recover"):
@@ -104,21 +132,27 @@ class Worker(threading.Thread):
                             continue
                         if command == "start":
                             self.active = True
+                            self.runtime.update(sync_active=True)
+                            logging.info('Sync start requested mode=%s hz=%s demo=%s', self.settings['mode'], self.settings['hz'], self.settings['demo'])
                             next_reconnect = 0.0
                             reconnect_attempts = 0
                             self.event("active", True)
                             continue
                         try:
-                            halo.open()
+                            with self.runtime.operation('recover_connect'):
+                                halo.open()
                             if command == "recover" and not halo.recovery_path.exists():
                                 halo.close()
                                 self.event("device", "没有待恢复的屏幕记录")
                                 continue
-                            halo.capture()
-                            halo.restore()
+                            with self.runtime.operation('recover_screen'):
+                                halo.capture()
+                                halo.restore()
+                            logging.info('Manual screen recovery succeeded')
                             halo.close()
                             self.event("device", "原屏幕已恢复")
                         except Exception as exc:
+                            logging.exception('Manual screen recovery failed')
                             halo.close()
                             self.event("error", str(exc))
                 if quitting:
@@ -126,6 +160,12 @@ class Worker(threading.Thread):
                 now = time.monotonic()
                 settings = self.settings.copy()
                 truck = demo(now - start) if settings["demo"] else reader.read()
+                current_telemetry = (truck.connected, truck.game_id, truck.paused, truck.reason, settings['demo'])
+                if current_telemetry != telemetry_state:
+                    logging.info('Telemetry changed connected=%s game=%s paused=%s demo=%s reason=%s', *current_telemetry[:3], current_telemetry[4], current_telemetry[3])
+                    telemetry_state = current_telemetry
+                    self.runtime.update(telemetry_connected=truck.connected, game_id=truck.game_id,
+                                        paused=truck.paused, telemetry_reason=truck.reason, demo=settings['demo'])
                 try:
                     frame = format_frame(truck, settings["mode"], color=settings['color'], alerts=settings['alerts'],
                                          custom=settings['custom'], gear_mode=settings['gear_mode'], speed_unit=settings.get('speed_unit', 'km/h'))
@@ -138,8 +178,13 @@ class Worker(threading.Thread):
                 self.event("frame", (truck, frame))
                 if self.active and not halo.device and now >= next_reconnect:
                     try:
-                        halo.open()
-                        halo.capture()
+                        self.runtime.increment('connect_attempts')
+                        with self.runtime.operation('connect_device'):
+                            halo.open()
+                        with self.runtime.operation('capture_screen'):
+                            halo.capture()
+                        self.runtime.increment('connections')
+                        self.runtime.update(device_connected=True, last_error=None, consecutive_connect_failures=0)
                         first_send = True
                         reconnect_attempts = 0
                         last_error = None
@@ -148,18 +193,24 @@ class Worker(threading.Thread):
                     except Exception as exc:
                         halo.close()
                         reconnect_attempts += 1
+                        self.runtime.update(device_connected=False, last_error=redact_text(exc),
+                                            consecutive_connect_failures=reconnect_attempts)
                         delay = min(10, 2 * reconnect_attempts)
                         next_reconnect = time.monotonic() + delay
                         self.event("device", f"音响连接异常，{delay} 秒后自动重试：{exc}")
                         if str(exc) != last_error:
-                            logging.exception("HID 连接失败，自动重试")
+                            logging.exception("HID 连接失败，自动重试 attempt=%s delay=%ss", reconnect_attempts, delay)
                             last_error = str(exc)
                 if self.active and halo.device and now - last_send >= 1 / settings["hz"]:
                     try:
-                        halo.show(frame, verify=first_send)
+                        with self.runtime.operation('sync_frame'):
+                            halo.show(frame, verify=first_send)
+                        self.runtime.increment('sync_cycles')
                         first_send = False
                         last_send = now
                     except Exception as exc:
+                        self.runtime.increment('sync_failures')
+                        self.runtime.update(device_connected=False, last_error=redact_text(exc))
                         logging.exception("HID 同步失败，将自动重连；保留原屏幕恢复记录")
                         halo.close()
                         next_reconnect = time.monotonic() + 2
@@ -171,13 +222,18 @@ class Worker(threading.Thread):
                         self.event('hardware', {'rows': rows, 'active': self.active})
                         self.event("scan", '音响已连接' if usable else '发现候选接口，请打开“设备与诊断”验证' if rows else '未检测到音响 USB 接口')
                     except Exception as exc:
+                        logging.warning('Device enumeration failed: %s', exc)
                         self.event("scan", str(exc))
                     last_scan = now
+                if self.active and now - last_summary >= 60:
+                    logging.info('Runtime summary %s', json.dumps(self.runtime.snapshot(), ensure_ascii=False))
+                    last_summary = now
                 self.finished.wait(.1)
         except Exception as exc:
             logging.exception("后台线程异常")
             self.event("error", f"后台线程退出：{exc}，请关闭后重新启动")
         finally:
+            logging.info('Worker final runtime %s', json.dumps(self.runtime.snapshot(), ensure_ascii=False))
             try:
                 if halo.device:
                     halo.restore()
@@ -222,6 +278,8 @@ class App:
         self.layout_choices = {}
         self.editor = None
         self.device_dialog = None
+        self.feedback_busy = False
+        root.report_callback_exception = self.ui_exception
         self.hardware_state = {'rows': [], 'active': False}
         self.refresh_layout_choices()
         self.load_settings()
@@ -335,8 +393,10 @@ class App:
                     _, self.custom_layout = self.layout_catalog.resolve(selected, self.speed_unit.get())
             if 'draft' in data or migrate_active:
                 self.save_settings()
-        except (OSError, ValueError):
+        except FileNotFoundError:
             pass
+        except (OSError, ValueError):
+            logging.exception('Preferences could not be loaded; using available defaults')
 
     def settings(self):
         kind, key = self.layout_choices.get(self.mode.get(), ('preset', 1))
@@ -410,6 +470,16 @@ class App:
             elif kind == 'hardware_notice':
                 if self.device_dialog is not None and self.device_dialog.exists():
                     self.device_dialog.notice(value['text'], value['error'])
+            elif kind == 'feedback_ready':
+                self.feedback_busy = False
+                if self.device_dialog is not None and self.device_dialog.exists():
+                    self.device_dialog.feedback_button.configure(state='normal')
+                    self.device_dialog.notice(value['text'], value['error'])
+                if not value['error']:
+                    try:
+                        os.startfile(value['path'].parent)
+                    except OSError:
+                        logging.exception('Could not open feedback folder')
             elif kind == "error":
                 logging.error(value)
                 self.device_status.configure(text=value, wraplength=720)
@@ -447,13 +517,50 @@ class App:
 
     def open_device_dialog(self, scan=True):
         if self.device_dialog is None or not self.device_dialog.exists():
-            self.device_dialog = DeviceDialog(self.root, self.worker.commands.put, STATE)
+            self.device_dialog = DeviceDialog(self.root, self.worker.commands.put, STATE, on_feedback=self.create_feedback)
         else:
             self.device_dialog.window.lift()
         self.device_dialog.set_state(self.hardware_state)
+        self.device_dialog.feedback_button.configure(state='disabled' if self.feedback_busy else 'normal')
         if scan:
             self.device_dialog.refresh()
         return self.device_dialog
+
+    def ui_exception(self, exc_type, value, traceback):
+        record_ui_exception(exc_type, value, traceback)
+        try:
+            messagebox.showerror('HaloTruckDash', '界面操作发生异常，详情已记录。\n请打开“设备与诊断…”导出反馈包。', parent=self.root)
+        except Exception:
+            logging.exception('Could not show UI exception notice')
+
+    def create_feedback(self):
+        if self.feedback_busy:
+            return
+        self.feedback_busy = True
+        if self.device_dialog is not None and self.device_dialog.exists():
+            self.device_dialog.feedback_button.configure(state='disabled')
+            self.device_dialog.status.configure(text='正在导出脱敏反馈包，不操作音响屏幕…')
+        # Copy UI values here; the export thread never accesses Tk objects.
+        try:
+            options = self.settings()
+        except Exception:
+            logging.exception('Could not collect UI options for feedback')
+            options = {}
+        game_dirs = self.game_dirs.copy()
+        game_dirs[self._install_key] = self.game_dir.get()
+        runtime = getattr(self.worker, 'runtime', None)
+        def collect():
+            try:
+                document = collect_diagnostics(STATE)
+                path = export_feedback(STATE, document, runtime.snapshot() if runtime else {}, options,
+                                       plugin_information(ASSETS, game_dirs))
+                result = {'text': f'反馈包已导出：{path.name}。点击“反馈问题…”填写问题并手动附上ZIP。',
+                          'path': path, 'error': False}
+            except Exception as exc:
+                logging.exception('Feedback export failed')
+                result = {'text': f'反馈包导出失败：{exc}', 'error': True}
+            self.worker.events.put(('feedback_ready', result))
+        threading.Thread(target=collect, name='FeedbackExport', daemon=True).start()
 
     def install_target_changed(self, event=None):
         self.game_dirs[self._install_key] = self.game_dir.get()
@@ -469,12 +576,16 @@ class App:
 
     def install(self):
         try:
+            logging.info('Plugin installation requested game=%s', self._install_key)
             result = install_plugin(self.game_dir.get(), ASSETS / "assets" / "scs-telemetry.dll", expected_game=self._install_key)
+            logging.info('Plugin installation checked successfully game=%s', self._install_key)
             self.save_settings()
             messagebox.showinfo("欧卡2 / 美卡遥测插件", result, parent=self.root)
         except PermissionError:
+            logging.exception('Plugin installation permission denied')
             messagebox.showerror("无法写入游戏目录", "请关闭本程序，以管理员身份运行后再安装插件。", parent=self.root)
         except Exception as exc:
+            logging.exception('Plugin installation failed')
             messagebox.showerror("插件安装失败", str(exc), parent=self.root)
 
     def edit_layout(self):
@@ -514,6 +625,8 @@ class App:
             '安装器不会覆盖不同版本的同名插件，请勿直接删改其他软件插件。\n'
             '“设备与诊断”可发现未知PID候选接口，停止同步后验证并选用；\n'
             '验证只查询状态和文字，不改变显示；可导出不含序列号的诊断。\n'
+            '遇到问题可“导出反馈包”，再点击“反馈问题…”手动附上ZIP；\n'
+            '反馈包包含脱敏近期日志和运行统计，不会自动上传。\n'
             '切换欧卡/美卡前先退出上一款游戏。详细用法见同目录README.md；\n'
             f'设置、布局、日志和恢复记录目录：\n{STATE}', parent=self.root)
 
@@ -533,11 +646,15 @@ class App:
         if self.closing:
             return
         self.closing = True
+        logging.info('Application shutdown requested')
         if self.poll_id is not None:
             self.root.after_cancel(self.poll_id)
             self.poll_id = None
         self.root.title("正在恢复屏幕并退出…")
-        self.save_settings()
+        try:
+            self.save_settings()
+        except Exception:
+            logging.exception('Could not save preferences during shutdown')
         self.worker.commands.put("quit")
         self.wait_close()
 
@@ -550,8 +667,10 @@ class App:
 def main():
     global STATE
     parser = argparse.ArgumentParser()
-    parser.add_argument("--diagnose", action="store_true")
-    parser.add_argument("--ui-smoke", action="store_true", help="Open preview briefly; never writes hardware")
+    commands = parser.add_mutually_exclusive_group()
+    commands.add_argument("--diagnose", action="store_true")
+    commands.add_argument('--feedback', action='store_true', help='Export a local feedback ZIP without opening the UI')
+    commands.add_argument("--ui-smoke", action="store_true", help="Open preview briefly; never writes hardware")
     args = parser.parse_args()
     # A smoke preview must neither contend with a driving session nor save
     # preferences into the interactive application's profile.
@@ -561,8 +680,12 @@ def main():
     else:
         STATE = data_directory(BASE)
     STATE.mkdir(exist_ok=True)
-    logging.basicConfig(filename=STATE / "dashboard.log", encoding="utf-8", level=logging.INFO,
-                        format="%(asctime)s %(levelname)s %(message)s")
+    configure_logging(STATE)
+    install_exception_hooks()
+    if args.feedback:
+        path = export_feedback(STATE, collect_diagnostics(STATE), plugins=plugin_information(ASSETS, {}))
+        logging.info('Command-line feedback export completed file=%s', path.name)
+        return
     if args.diagnose:
         reader = Telemetry()
         try:
@@ -596,6 +719,7 @@ def main():
             root.after(1500, app.close)
         root.mainloop()
     finally:
+        logging.info('Session ended')
         if mutex:
             kernel.CloseHandle(mutex)
         if preview_state is not None:

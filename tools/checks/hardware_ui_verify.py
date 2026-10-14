@@ -4,6 +4,7 @@ import queue
 import sys
 import tempfile
 import threading
+import time
 import tkinter as tk
 from tkinter import ttk
 from unittest.mock import patch
@@ -13,6 +14,7 @@ from halo_dashboard.app import App
 from halo_dashboard.hardware import DeviceRegistry, device_rows, device_key
 from halo_dashboard.telemetry import Truck
 from halo_dashboard.display import format_frame
+from halo_dashboard.version import VERSION
 
 
 class PreviewWorker:
@@ -72,10 +74,30 @@ with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as temporary:
         with patch('halo_dashboard.device_dialog.os.startfile') as opened:
             panel.open_folder()
         opened.assert_called_once_with(state)
+        with patch('halo_dashboard.device_dialog.webbrowser.open', return_value=True) as browser:
+            panel.issue_button.invoke()
+        assert 'template=bug_report.yml' in browser.call_args.args[0]
+        assert f'version={VERSION}' in browser.call_args.args[0]
+        # This worker never consumes commands: feedback must finish independently.
+        with patch('halo_dashboard.app.collect_diagnostics', return_value={'devices': [], 'hid_queries_sent': False}), \
+             patch('halo_dashboard.app.plugin_information', return_value={}), \
+             patch('halo_dashboard.app.os.startfile') as folder:
+            panel.feedback_button.invoke()
+            assert app.feedback_busy
+            deadline = time.monotonic() + 3
+            while app.feedback_busy and time.monotonic() < deadline:
+                root.update()
+                time.sleep(.01)
+            assert not app.feedback_busy
+            folder.assert_called_once_with(state / 'feedback')
+        assert len(list((state / 'feedback').glob('*.zip'))) == 1
+        assert '反馈包已导出' in panel.status.cget('text')
         app.worker.events.put(('hardware', {'rows': [], 'active': False}))
         app.poll()
         assert not panel.tree.selection() and str(panel.verify_button.cget('state')) == 'disabled'
-        app.close()
+        with patch.object(app, 'save_settings', side_effect=PermissionError('simulated read-only directory')):
+            app.close()
+        assert app.closing and app.worker.commands.get_nowait() == 'quit'
 
         for scaling in (4 / 3, 2, 8 / 3):
             root = tk.Tk()
@@ -99,4 +121,4 @@ with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as temporary:
                     walk(child)
             walk(window)
             app.close()
-print('Hardware UI: unknown candidates, validation commands, active-session lock, diagnostics export, live telemetry and 100/150/200% window fit passed.')
+print('Hardware UI: validation, active-session lock, independent feedback ZIP/folder, issue URL, live telemetry and 100/150/200% window fit passed.')
